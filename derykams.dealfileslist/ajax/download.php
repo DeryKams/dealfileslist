@@ -52,7 +52,20 @@ try {
 
     // === ПРОВЕРКА ПРИНАДЛЕЖНОСТИ ФАЙЛА СДЕЛКЕ ===
 
-    // Получаем коды файловых полей через CUserTypeEntity::GetList
+    /*
+        Файл может принадлежать сделке через:
+        1. UF-поля типа "Файл" — fileId в значениях полей
+        2. Дела (активности) — fileId получается через цепочку
+           STORAGE_ELEMENT_IDS -> b_disk_object -> FILE_ID
+
+        Проверяем оба источника. Если файл найден в любом из них —
+        считаем что он принадлежит сделке.
+    */
+
+    $dealFileIds = [];
+
+    // --- Источник 1: UF-поля ---
+
     $fileFieldCodes = [];
 
     $rsFields = \CUserTypeEntity::GetList(
@@ -68,15 +81,12 @@ try {
         }
     }
 
-    // Значения полей для конкретной сделки
     global $USER_FIELD_MANAGER;
     $dealUserFields = $USER_FIELD_MANAGER->GetUserFields('CRM_DEAL', $dealId);
     if (!is_array($dealUserFields)) {
         $dealUserFields = [];
     }
 
-    // Собираем все ID файлов из всех файловых полей сделки
-    $dealFileIds = [];
     foreach ($fileFieldCodes as $code) {
         if (!isset($dealUserFields[$code])) {
             continue;
@@ -99,6 +109,45 @@ try {
             $id = (int)$value;
             if ($id > 0) {
                 $dealFileIds[] = $id;
+            }
+        }
+    }
+
+    // --- Источник 2: Дела (активности) сделки ---
+
+    $rsActivities = \CCrmActivity::GetList(
+        ['ID' => 'ASC'],
+        [
+            'OWNER_TYPE_ID' => \CCrmOwnerType::Deal,
+            'OWNER_ID' => $dealId,
+            'CHECK_PERMISSIONS' => 'N'
+        ],
+        false, false,
+        ['ID', 'STORAGE_TYPE_ID', 'STORAGE_ELEMENT_IDS']
+    );
+
+    global $DB;
+
+    while ($arActivity = $rsActivities->Fetch()) {
+        $rawIds = $arActivity['STORAGE_ELEMENT_IDS'] ?? '';
+        $elementIds = @unserialize($rawIds);
+        if (!is_array($elementIds) || empty($elementIds)) {
+            continue;
+        }
+
+        foreach ($elementIds as $elementId) {
+            $elementId = (int)$elementId;
+            if ($elementId <= 0) {
+                continue;
+            }
+
+            // elementId = ID в b_disk_object -> FILE_ID
+            $rsObj = $DB->Query(
+                "SELECT FILE_ID FROM b_disk_object WHERE ID = {$elementId}"
+            );
+            $arObj = $rsObj ? $rsObj->Fetch() : null;
+            if ($arObj && (int)$arObj['FILE_ID'] > 0) {
+                $dealFileIds[] = (int)$arObj['FILE_ID'];
             }
         }
     }

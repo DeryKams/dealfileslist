@@ -50,7 +50,7 @@ class derykams_dealfileslist extends CModule
         $this->MODULE_DESCRIPTION = Loc::getMessage('DERYKAMS_DFL_MODULE_DESCRIPTION') ?: 'Кнопка в карточке сделки для просмотра всех загруженных файлов';
 
         $this->PARTNER_NAME = Loc::getMessage('DERYKAMS_DFL_PARTNER_NAME') ?: 'DeryKams';
-        $this->PARTNER_URI  = Loc::getMessage('DERYKAMS_DFL_PARTNER_URI')  ?: 'https://github.com/DeryKams';
+        $this->PARTNER_URI  = Loc::getMessage('DERYKAMS_DFL_PARTNER_URI')  ?: 'https://github.com/DeryKams/dealfileslist';
     }
 
     /**

@@ -16,6 +16,13 @@
  *      b_disk_object -> b_file.
  *      Коннектор: Bitrix\Crm\Integration\Disk\CommentConnector
  *      Скачивание через стандартный /bitrix/tools/disk/uf.php (проверяет права).
+ *
+ *   3. Дела (активности) сделки
+ *      Файлы хранятся через STORAGE_ELEMENT_IDS дела — это ID объектов
+ *      в b_disk_object, которые ссылаются на b_file.
+ *      STORAGE_TYPE_ID = 3 (File/Disk) в современных версиях Битрикс
+ *      использует b_disk_object, а не b_file напрямую.
+ *      Скачивание через наш прокси download.php.
  */
 
 error_reporting(E_ALL);
@@ -323,6 +330,96 @@ try {
                     'extension' => dflGetFileExtension($displayName),
                 ];
             }
+        }
+    }
+
+    // ========================================
+    // ИСТОЧНИК 3: Файлы из дел (активностей) сделки
+    // ========================================
+
+    /*
+        1. Получаем все дела сделки через CCrmActivity::GetList
+        2. Для каждого дела десериализуем STORAGE_ELEMENT_IDS —
+           это массив ID объектов в b_disk_object
+        3. Для каждого disk_object получаем FILE_ID -> b_file
+        4. Скачивание через наш прокси download.php
+
+        STORAGE_TYPE_ID = 3 в современном Битрикс означает что
+        STORAGE_ELEMENT_IDS содержит ID объектов b_disk_object
+        (не b_file напрямую, как можно было бы ожидать).
+    */
+    $rsActivities = \CCrmActivity::GetList(
+        ['ID' => 'ASC'],
+        [
+            'OWNER_TYPE_ID' => \CCrmOwnerType::Deal,
+            'OWNER_ID' => $dealId,
+            'CHECK_PERMISSIONS' => 'N'
+        ],
+        false, false,
+        ['ID', 'STORAGE_TYPE_ID', 'STORAGE_ELEMENT_IDS']
+    );
+
+    while ($arActivity = $rsActivities->Fetch()) {
+        $storageType = (int)($arActivity['STORAGE_TYPE_ID'] ?? 0);
+        $rawIds = $arActivity['STORAGE_ELEMENT_IDS'] ?? '';
+
+        // Десериализуем массив ID
+        $elementIds = @unserialize($rawIds);
+        if (!is_array($elementIds) || empty($elementIds)) {
+            continue;
+        }
+
+        global $DB;
+
+        foreach ($elementIds as $elementId) {
+            $elementId = (int)$elementId;
+            if ($elementId <= 0) {
+                continue;
+            }
+
+            // STORAGE_TYPE_ID = 3: elementId = ID в b_disk_object
+            // Получаем FILE_ID через JOIN b_disk_object -> b_file
+            $rsSql = $DB->Query(
+                "SELECT o.FILE_ID, o.NAME as DISK_NAME,
+                        f.ORIGINAL_NAME, f.CONTENT_TYPE, f.FILE_SIZE,
+                        f.TIMESTAMP_X
+                 FROM b_disk_object o
+                 LEFT JOIN b_file f ON f.ID = o.FILE_ID
+                 WHERE o.ID = {$elementId}"
+            );
+
+            $arSql = $rsSql ? $rsSql->Fetch() : null;
+            if (!$arSql) {
+                continue;
+            }
+
+            $fileId = (int)($arSql['FILE_ID'] ?? 0);
+            if ($fileId <= 0) {
+                continue;
+            }
+
+            $displayName = $arSql['ORIGINAL_NAME'] ?? '';
+            if ($displayName === '') {
+                $displayName = $arSql['DISK_NAME'] ?? 'Без названия';
+            }
+
+            // Скачивание через наш прокси download.php
+            $downloadUrl = '/local/modules/derykams.dealfileslist/ajax/download.php'
+                . '?dealId=' . $dealId
+                . '&fileId=' . $fileId
+                . '&source=activity'
+                . '&sessid=' . bitrix_sessid();
+
+            $files[] = [
+                'id'     => $fileId,
+                'name'   => $displayName,
+                'size'   => dflFormatFileSize((int)($arSql['FILE_SIZE'] ?? 0)),
+                'mime'   => $arSql['CONTENT_TYPE'] ?? 'application/octet-stream',
+                'date'   => dflFormatDate($arSql['TIMESTAMP_X'] ?? ''),
+                'url'    => $downloadUrl,
+                'source' => 'Дело',
+                'extension' => dflGetFileExtension($displayName),
+            ];
         }
     }
 
