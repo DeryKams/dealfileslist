@@ -8,21 +8,12 @@
  *
  * Источники файлов:
  *   1. Пользовательские поля сделки типа "Файл" (UF_CRM_*)
- *      Файлы хранятся в b_file, в поле записан ID файла.
- *      Скачивание через наш прокси download.php.
+ *   2. Комментарии в таймлайне сделки (Disk\CommentConnector)
+ *   3. Дела (активности) сделки (STORAGE_ELEMENT_IDS → b_disk_object)
+ *   4. Сгенерированные документы (модуль documentgenerator)
  *
- *   2. Комментарии в таймлайне сделки
- *      Файлы хранятся через модуль Disk: b_disk_attached_object ->
- *      b_disk_object -> b_file.
- *      Коннектор: Bitrix\Crm\Integration\Disk\CommentConnector
- *      Скачивание через стандартный /bitrix/tools/disk/uf.php (проверяет права).
- *
- *   3. Дела (активности) сделки
- *      Файлы хранятся через STORAGE_ELEMENT_IDS дела — это ID объектов
- *      в b_disk_object, которые ссылаются на b_file.
- *      STORAGE_TYPE_ID = 3 (File/Disk) в современных версиях Битрикс
- *      использует b_disk_object, а не b_file напрямую.
- *      Скачивание через наш прокси download.php.
+ * Каждый источник обёрнут в свой try-catch — если один падает,
+ * остальные продолжают работать.
  */
 
 error_reporting(E_ALL);
@@ -94,14 +85,12 @@ function dflFormatDate(string $bitrixDate): string
  */
 function dflGetFileExtension(string $fileName): string
 {
-    // Если в имени есть точка — берём часть после последней точки
     $dotPos = strrpos($fileName, '.');
     if ($dotPos === false) {
         return '';
     }
 
     $ext = strtolower(substr($fileName, $dotPos + 1));
-    // Очищаем: только буквы/цифры, до 5 символов
     $ext = preg_replace('/[^a-z0-9]/', '', $ext);
 
     return ($ext !== '' && strlen($ext) <= 5) ? $ext : '';
@@ -159,150 +148,212 @@ try {
     // ИСТОЧНИК 1: UF-поля сделки типа "Файл"
     // ========================================
 
-    /*
-        Получаем схему UF-полей через CUserTypeEntity::GetList,
-        фильтруем типа 'file', затем получаем значения для сделки.
-    */
-    $fileFieldCodes = [];
+    try {
+        $fileFieldCodes = [];
 
-    $rsFields = \CUserTypeEntity::GetList(
-        ['SORT' => 'ASC'],
-        ['ENTITY_ID' => 'CRM_DEAL']
-    );
+        $rsFields = \CUserTypeEntity::GetList(
+            ['SORT' => 'ASC'],
+            ['ENTITY_ID' => 'CRM_DEAL']
+        );
 
-    if ($rsFields) {
-        while ($arField = $rsFields->Fetch()) {
-            if (($arField['USER_TYPE_ID'] ?? '') === 'file') {
-                $fileFieldCodes[] = $arField['FIELD_NAME'];
+        if ($rsFields) {
+            while ($arField = $rsFields->Fetch()) {
+                if (($arField['USER_TYPE_ID'] ?? '') === 'file') {
+                    $fileFieldCodes[] = $arField['FIELD_NAME'];
+                }
             }
         }
-    }
 
-    if (!empty($fileFieldCodes)) {
-        global $USER_FIELD_MANAGER;
+        if (!empty($fileFieldCodes)) {
+            global $USER_FIELD_MANAGER;
 
-        $dealUserFields = $USER_FIELD_MANAGER->GetUserFields('CRM_DEAL', $dealId);
-        if (!is_array($dealUserFields)) {
-            $dealUserFields = [];
-        }
-
-        // Извлекаем ID файлов из UF-полей
-        $ufFileIds = [];
-        foreach ($fileFieldCodes as $code) {
-            if (!isset($dealUserFields[$code])) {
-                continue;
+            $dealUserFields = $USER_FIELD_MANAGER->GetUserFields('CRM_DEAL', $dealId);
+            if (!is_array($dealUserFields)) {
+                $dealUserFields = [];
             }
 
-            $value = $dealUserFields[$code]['VALUE'] ?? null;
+            $ufFileIds = [];
+            foreach ($fileFieldCodes as $code) {
+                if (!isset($dealUserFields[$code])) {
+                    continue;
+                }
 
-            if ($value === null || $value === '' || $value === false) {
-                continue;
-            }
+                $value = $dealUserFields[$code]['VALUE'] ?? null;
 
-            if (is_array($value)) {
-                foreach ($value as $singleId) {
-                    $id = (int)$singleId;
+                if ($value === null || $value === '' || $value === false) {
+                    continue;
+                }
+
+                if (is_array($value)) {
+                    foreach ($value as $singleId) {
+                        $id = (int)$singleId;
+                        if ($id > 0) {
+                            $ufFileIds[] = $id;
+                        }
+                    }
+                } else {
+                    $id = (int)$value;
                     if ($id > 0) {
                         $ufFileIds[] = $id;
                     }
                 }
-            } else {
-                $id = (int)$value;
-                if ($id > 0) {
-                    $ufFileIds[] = $id;
+            }
+
+            $ufFileIds = array_values(array_unique($ufFileIds));
+
+            foreach ($ufFileIds as $fileId) {
+                $rsFile = \CFile::GetByID($fileId);
+                $arFile = $rsFile ? $rsFile->Fetch() : null;
+
+                if (!$arFile) {
+                    continue;
                 }
+
+                $originalName = $arFile['ORIGINAL_NAME'] ?? '';
+                $fileName     = $arFile['FILE_NAME'] ?? '';
+                $displayName  = ($originalName !== '') ? $originalName : $fileName;
+
+                $downloadUrl = '/local/modules/derykams.dealfileslist/ajax/download.php'
+                    . '?dealId=' . $dealId
+                    . '&fileId=' . $fileId
+                    . '&sessid=' . bitrix_sessid();
+
+                $files[] = [
+                    'id'        => $fileId,
+                    'name'      => $displayName,
+                    'size'      => dflFormatFileSize((int)($arFile['FILE_SIZE'] ?? 0)),
+                    'mime'      => $arFile['CONTENT_TYPE'] ?? 'application/octet-stream',
+                    'date'      => dflFormatDate($arFile['TIMESTAMP_X'] ?? ''),
+                    'url'       => $downloadUrl,
+                    'source'    => 'Поле сделки',
+                    'extension' => dflGetFileExtension($displayName),
+                ];
             }
         }
-
-        // Убираем дубли
-        $ufFileIds = array_values(array_unique($ufFileIds));
-
-        // Получаем информацию о файлах через CFile::GetByID
-        foreach ($ufFileIds as $fileId) {
-            $rsFile = \CFile::GetByID($fileId);
-            $arFile = $rsFile ? $rsFile->Fetch() : null;
-
-            if (!$arFile) {
-                continue;
-            }
-
-            $originalName = $arFile['ORIGINAL_NAME'] ?? '';
-            $fileName     = $arFile['FILE_NAME'] ?? '';
-            $displayName  = ($originalName !== '') ? $originalName : $fileName;
-
-            // Скачивание через наш прокси download.php
-            $downloadUrl = '/local/modules/derykams.dealfileslist/ajax/download.php'
-                . '?dealId=' . $dealId
-                . '&fileId=' . $fileId
-                . '&sessid=' . bitrix_sessid();
-
-            $files[] = [
-                'id'     => $fileId,
-                'name'   => $displayName,
-                'size'   => dflFormatFileSize((int)($arFile['FILE_SIZE'] ?? 0)),
-                'mime'   => $arFile['CONTENT_TYPE'] ?? 'application/octet-stream',
-                'date'   => dflFormatDate($arFile['TIMESTAMP_X'] ?? ''),
-                'url'    => $downloadUrl,
-                'source' => 'Поле сделки',
-                'extension' => dflGetFileExtension($displayName),
-            ];
-        }
+    } catch (\Throwable $e) {
+        // Ошибка в источнике 1 — не убиваем остальные
     }
 
     // ========================================
     // ИСТОЧНИК 2: Файлы из комментариев таймлайна
     // ========================================
 
-    /*
-        1. Получаем записи таймлайна сделки (TYPE_ID = 7 — комментарий)
-           через TimelineTable::getList с фильтром по сделке.
-        2. Для каждого комментария ищем attached objects в
-           b_disk_attached_object через прямой SQL с JOIN
-           b_disk_object + b_file.
-        3. Ссылка для скачивания — стандартный endpoint Битрикс:
-           /bitrix/tools/disk/uf.php?action=download&ncc=1&attachedId=XX
-           Он сам проверяет права доступа.
-    */
-    if (Loader::includeModule('disk')) {
-        // Получаем ID комментариев сделки из TimelineTable
-        $timelineEntries = \Bitrix\Crm\Timeline\Entity\TimelineTable::getList([
-            'filter' => [
-                '=TYPE_ID' => 7, // TimelineType::COMMENT
-                'BINDINGS.ENTITY_ID' => $dealId,
-                'BINDINGS.ENTITY_TYPE_ID' => \CCrmOwnerType::Deal
-            ],
-            'select' => ['ID', 'CREATED'],
-            'order' => ['ID' => 'DESC']
-        ]);
+    try {
+        if (Loader::includeModule('disk')) {
+            $timelineEntries = \Bitrix\Crm\Timeline\Entity\TimelineTable::getList([
+                'filter' => [
+                    '=TYPE_ID' => 7,
+                    'BINDINGS.ENTITY_ID' => $dealId,
+                    'BINDINGS.ENTITY_TYPE_ID' => \CCrmOwnerType::Deal
+                ],
+                'select' => ['ID', 'CREATED'],
+                'order' => ['ID' => 'DESC']
+            ]);
 
-        $commentIds = [];
-        while ($ar = $timelineEntries->Fetch()) {
-            $commentIds[] = (int)$ar['ID'];
+            $commentIds = [];
+            while ($ar = $timelineEntries->Fetch()) {
+                $commentIds[] = (int)$ar['ID'];
+            }
+
+            if (!empty($commentIds)) {
+                global $DB;
+
+                $commentIdsStr = implode(',', array_map('intval', $commentIds));
+
+                $rsSql = $DB->Query(
+                    "SELECT a.ID as ATTACHED_ID, a.ENTITY_ID as COMMENT_ID,
+                            o.FILE_ID, o.NAME as DISK_NAME,
+                            f.ORIGINAL_NAME, f.CONTENT_TYPE, f.FILE_SIZE,
+                            f.TIMESTAMP_X
+                     FROM b_disk_attached_object a
+                     LEFT JOIN b_disk_object o ON o.ID = a.OBJECT_ID
+                     LEFT JOIN b_file f ON f.ID = o.FILE_ID
+                     WHERE a.ENTITY_TYPE = 'Bitrix\\\\Crm\\\\Integration\\\\Disk\\\\CommentConnector'
+                     AND a.ENTITY_ID IN ({$commentIdsStr})"
+                );
+
+                while ($arSql = $rsSql->Fetch()) {
+                    $fileId = (int)($arSql['FILE_ID'] ?? 0);
+                    $attachedId = (int)$arSql['ATTACHED_ID'];
+
+                    if ($fileId <= 0) {
+                        continue;
+                    }
+
+                    $displayName = $arSql['ORIGINAL_NAME'] ?? '';
+                    if ($displayName === '') {
+                        $displayName = $arSql['DISK_NAME'] ?? 'Без названия';
+                    }
+
+                    $downloadUrl = '/bitrix/tools/disk/uf.php'
+                        . '?action=download'
+                        . '&ncc=1'
+                        . '&attachedId=' . $attachedId;
+
+                    $files[] = [
+                        'id'        => $fileId,
+                        'name'      => $displayName,
+                        'size'      => dflFormatFileSize((int)($arSql['FILE_SIZE'] ?? 0)),
+                        'mime'      => $arSql['CONTENT_TYPE'] ?? 'application/octet-stream',
+                        'date'      => dflFormatDate($arSql['TIMESTAMP_X'] ?? ''),
+                        'url'       => $downloadUrl,
+                        'source'    => 'Комментарий',
+                        'extension' => dflGetFileExtension($displayName),
+                    ];
+                }
+            }
         }
+    } catch (\Throwable $e) {
+        // Ошибка в источнике 2 — не убиваем остальные
+    }
 
-        if (!empty($commentIds)) {
+    // ========================================
+    // ИСТОЧНИК 3: Файлы из дел (активностей) сделки
+    // ========================================
+
+    try {
+        $rsActivities = \CCrmActivity::GetList(
+            ['ID' => 'ASC'],
+            [
+                'OWNER_TYPE_ID' => \CCrmOwnerType::Deal,
+                'OWNER_ID' => $dealId,
+                'CHECK_PERMISSIONS' => 'N'
+            ],
+            false, false,
+            ['ID', 'STORAGE_TYPE_ID', 'STORAGE_ELEMENT_IDS']
+        );
+
+        while ($arActivity = $rsActivities->Fetch()) {
+            $rawIds = $arActivity['STORAGE_ELEMENT_IDS'] ?? '';
+
+            $elementIds = @unserialize($rawIds);
+            if (!is_array($elementIds) || empty($elementIds)) {
+                continue;
+            }
+
             global $DB;
 
-            // Прямой SQL с JOIN — получаем файлы из комментариев
-            $commentIdsStr = implode(',', array_map('intval', $commentIds));
+            foreach ($elementIds as $elementId) {
+                $elementId = (int)$elementId;
+                if ($elementId <= 0) {
+                    continue;
+                }
 
-            $rsSql = $DB->Query(
-                "SELECT a.ID as ATTACHED_ID, a.ENTITY_ID as COMMENT_ID,
-                        o.FILE_ID, o.NAME as DISK_NAME,
-                        f.ORIGINAL_NAME, f.CONTENT_TYPE, f.FILE_SIZE,
-                        f.TIMESTAMP_X
-                 FROM b_disk_attached_object a
-                 LEFT JOIN b_disk_object o ON o.ID = a.OBJECT_ID
-                 LEFT JOIN b_file f ON f.ID = o.FILE_ID
-                 WHERE a.ENTITY_TYPE = 'Bitrix\\\\Crm\\\\Integration\\\\Disk\\\\CommentConnector'
-                 AND a.ENTITY_ID IN ({$commentIdsStr})"
-            );
+                $rsSql = $DB->Query(
+                    "SELECT o.FILE_ID, o.NAME as DISK_NAME,
+                            f.ORIGINAL_NAME, f.CONTENT_TYPE, f.FILE_SIZE,
+                            f.TIMESTAMP_X
+                     FROM b_disk_object o
+                     LEFT JOIN b_file f ON f.ID = o.FILE_ID
+                     WHERE o.ID = {$elementId}"
+                );
 
-            while ($arSql = $rsSql->Fetch()) {
+                $arSql = $rsSql ? $rsSql->Fetch() : null;
+                if (!$arSql) {
+                    continue;
+                }
+
                 $fileId = (int)($arSql['FILE_ID'] ?? 0);
-                $attachedId = (int)$arSql['ATTACHED_ID'];
-
-                // Пропускаем если нет файла
                 if ($fileId <= 0) {
                     continue;
                 }
@@ -312,115 +363,115 @@ try {
                     $displayName = $arSql['DISK_NAME'] ?? 'Без названия';
                 }
 
-                // Стандартный endpoint Битрикс для скачивания attached-файла
-                // ncc=1 — отключает композитный кеш
-                $downloadUrl = '/bitrix/tools/disk/uf.php'
-                    . '?action=download'
-                    . '&ncc=1'
-                    . '&attachedId=' . $attachedId;
+                $downloadUrl = '/local/modules/derykams.dealfileslist/ajax/download.php'
+                    . '?dealId=' . $dealId
+                    . '&fileId=' . $fileId
+                    . '&source=activity'
+                    . '&sessid=' . bitrix_sessid();
 
                 $files[] = [
-                    'id'     => $fileId,
-                    'name'   => $displayName,
-                    'size'   => dflFormatFileSize((int)($arSql['FILE_SIZE'] ?? 0)),
-                    'mime'   => $arSql['CONTENT_TYPE'] ?? 'application/octet-stream',
-                    'date'   => dflFormatDate($arSql['TIMESTAMP_X'] ?? ''),
-                    'url'    => $downloadUrl,
-                    'source' => 'Комментарий',
+                    'id'        => $fileId,
+                    'name'      => $displayName,
+                    'size'      => dflFormatFileSize((int)($arSql['FILE_SIZE'] ?? 0)),
+                    'mime'      => $arSql['CONTENT_TYPE'] ?? 'application/octet-stream',
+                    'date'      => dflFormatDate($arSql['TIMESTAMP_X'] ?? ''),
+                    'url'       => $downloadUrl,
+                    'source'    => 'Дело',
                     'extension' => dflGetFileExtension($displayName),
                 ];
             }
         }
+    } catch (\Throwable $e) {
+        // Ошибка в источнике 3 — не убиваем остальные
     }
 
     // ========================================
-    // ИСТОЧНИК 3: Файлы из дел (активностей) сделки
+    // ИСТОЧНИК 4: Сгенерированные документы
     // ========================================
 
-    /*
-        1. Получаем все дела сделки через CCrmActivity::GetList
-        2. Для каждого дела десериализуем STORAGE_ELEMENT_IDS —
-           это массив ID объектов в b_disk_object
-        3. Для каждого disk_object получаем FILE_ID -> b_file
-        4. Скачивание через наш прокси download.php
+    try {
+        $docModuleLoaded = Loader::includeModule('documentgenerator');
 
-        STORAGE_TYPE_ID = 3 в современном Битрикс означает что
-        STORAGE_ELEMENT_IDS содержит ID объектов b_disk_object
-        (не b_file напрямую, как можно было бы ожидать).
-    */
-    $rsActivities = \CCrmActivity::GetList(
-        ['ID' => 'ASC'],
-        [
-            'OWNER_TYPE_ID' => \CCrmOwnerType::Deal,
-            'OWNER_ID' => $dealId,
-            'CHECK_PERMISSIONS' => 'N'
-        ],
-        false, false,
-        ['ID', 'STORAGE_TYPE_ID', 'STORAGE_ELEMENT_IDS']
-    );
+        if ($docModuleLoaded) {
+            /*
+                Прямой SQL к b_documentgenerator_document.
+            */
+            global $DB;
 
-    while ($arActivity = $rsActivities->Fetch()) {
-        $storageType = (int)($arActivity['STORAGE_TYPE_ID'] ?? 0);
-        $rawIds = $arActivity['STORAGE_ELEMENT_IDS'] ?? '';
+            $dealIdInt = (int)$dealId;
 
-        // Десериализуем массив ID
-        $elementIds = @unserialize($rawIds);
-        if (!is_array($elementIds) || empty($elementIds)) {
-            continue;
-        }
-
-        global $DB;
-
-        foreach ($elementIds as $elementId) {
-            $elementId = (int)$elementId;
-            if ($elementId <= 0) {
-                continue;
-            }
-
-            // STORAGE_TYPE_ID = 3: elementId = ID в b_disk_object
-            // Получаем FILE_ID через JOIN b_disk_object -> b_file
-            $rsSql = $DB->Query(
-                "SELECT o.FILE_ID, o.NAME as DISK_NAME,
-                        f.ORIGINAL_NAME, f.CONTENT_TYPE, f.FILE_SIZE,
-                        f.TIMESTAMP_X
-                 FROM b_disk_object o
-                 LEFT JOIN b_file f ON f.ID = o.FILE_ID
-                 WHERE o.ID = {$elementId}"
+            // Пробуем БЕЗ фильтра PROVIDER — только VALUE
+            $rsDocs = $DB->Query(
+                "SELECT ID, TITLE, NUMBER, FILE_ID, PDF_ID, IMAGE_ID,
+                        TEMPLATE_ID, CREATE_TIME, PROVIDER, VALUE
+                 FROM b_documentgenerator_document
+                 WHERE VALUE = {$dealIdInt}
+                 ORDER BY ID DESC"
             );
 
-            $arSql = $rsSql ? $rsSql->Fetch() : null;
-            if (!$arSql) {
-                continue;
+            while ($arDoc = $rsDocs->Fetch()) {
+                $docId     = (int)$arDoc['ID'];
+                $docTitle  = (string)($arDoc['TITLE'] ?? '');
+                $docNumber = (string)($arDoc['NUMBER'] ?? '');
+                $fileId    = (int)($arDoc['FILE_ID'] ?? 0);
+                $pdfId     = (int)($arDoc['PDF_ID'] ?? 0);
+
+                // Формируем название документа
+                $displayName = '';
+                if ($docTitle !== '' && $docNumber !== '') {
+                    $displayName = $docTitle . ' №' . $docNumber;
+                } elseif ($docTitle !== '') {
+                    $displayName = $docTitle;
+                } elseif ($docNumber !== '') {
+                    $displayName = 'Документ №' . $docNumber;
+                } else {
+                    $displayName = 'Документ #' . $docId;
+                }
+
+                // Приоритет: PDF (если готов), иначе DOCX
+                $usePdf = ($pdfId > 0);
+                $effectiveFileId = $usePdf ? $pdfId : $fileId;
+
+                if ($effectiveFileId <= 0) {
+                    continue;
+                }
+
+                /*
+                    FILE_ID и PDF_ID в b_documentgenerator_document — это не ID
+                    в b_file, а внутренние ID модуля documentgenerator.
+                    CFile::GetByID для них не работает.
+
+                    Не запрашиваем размер/MIME через CFile — вместо этого
+                    используем фиксированные значения по типу файла.
+                    Размер не показываем (пустая строка), MIME — по расширению.
+                */
+                $fileExt = $usePdf ? 'pdf' : 'docx';
+                $fileName = $displayName . '.' . $fileExt;
+
+                // Ссылка для скачивания через AJAX-endpoint Битрикс
+                $action = $usePdf
+                    ? 'crm.documentgenerator.document.getPdf'
+                    : 'crm.documentgenerator.document.download';
+
+                $downloadUrl = '/bitrix/services/main/ajax.php'
+                    . '?action=' . $action
+                    . '&SITE_ID=s1'
+                    . '&id=' . $docId;
+
+                $files[] = [
+                    'id'        => $docId,
+                    'name'      => $fileName,
+                    'size'      => '',
+                    'mime'      => $usePdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'date'      => dflFormatDate($arDoc['CREATE_TIME'] ?? ''),
+                    'url'       => $downloadUrl,
+                    'source'    => 'Документ',
+                    'extension' => $fileExt,
+                ];
             }
-
-            $fileId = (int)($arSql['FILE_ID'] ?? 0);
-            if ($fileId <= 0) {
-                continue;
-            }
-
-            $displayName = $arSql['ORIGINAL_NAME'] ?? '';
-            if ($displayName === '') {
-                $displayName = $arSql['DISK_NAME'] ?? 'Без названия';
-            }
-
-            // Скачивание через наш прокси download.php
-            $downloadUrl = '/local/modules/derykams.dealfileslist/ajax/download.php'
-                . '?dealId=' . $dealId
-                . '&fileId=' . $fileId
-                . '&source=activity'
-                . '&sessid=' . bitrix_sessid();
-
-            $files[] = [
-                'id'     => $fileId,
-                'name'   => $displayName,
-                'size'   => dflFormatFileSize((int)($arSql['FILE_SIZE'] ?? 0)),
-                'mime'   => $arSql['CONTENT_TYPE'] ?? 'application/octet-stream',
-                'date'   => dflFormatDate($arSql['TIMESTAMP_X'] ?? ''),
-                'url'    => $downloadUrl,
-                'source' => 'Дело',
-                'extension' => dflGetFileExtension($displayName),
-            ];
         }
+    } catch (\Throwable $e) {
+        // Ошибка в источнике 4 — не убиваем остальные
     }
 
     dflSendJson([

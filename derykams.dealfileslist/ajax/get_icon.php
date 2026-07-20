@@ -63,6 +63,7 @@ $presets = [
     'pdf'   => ['color' => 'e74c3c', 'bg' => 'fef0f0'],
     'doc'   => ['color' => '2980b9', 'bg' => 'f0f7fe'],
     'docx'  => ['color' => '2980b9', 'bg' => 'f0f7fe'],
+    'rtf'   => ['color' => '2980b9', 'bg' => 'f0f7fe'],
     'xls'   => ['color' => '27ae60', 'bg' => 'f0fdf4'],
     'xlsx'  => ['color' => '27ae60', 'bg' => 'f0fdf4'],
     'ppt'   => ['color' => 'e67e22', 'bg' => 'fef5f0'],
