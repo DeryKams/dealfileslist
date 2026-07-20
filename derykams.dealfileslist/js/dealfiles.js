@@ -408,7 +408,7 @@
       overlay: true,
       lightShadow: true,
       draggable: false,
-      titleBar: 'Файлы сделки',
+      titleBar: 'Все файлы сделки',
       content: contentNode,
       offsetLeft: 0,
       offsetTop: 0,
@@ -496,7 +496,7 @@
     button.type = 'button';
     // ui-btn-primary — синяя кнопка, вписывается в стиль карточки сделки
     button.className = 'ui-btn ui-btn-sm ui-btn-round ui-btn-no-caps ui-btn-primary';
-    button.textContent = 'Файлы сделки';
+    button.textContent = 'Все файлы сделки';
 
     button.addEventListener('click', function () {
       handleButtonClick(button);

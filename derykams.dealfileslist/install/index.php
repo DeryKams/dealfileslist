@@ -46,7 +46,7 @@ class derykams_dealfileslist extends CModule
         $this->MODULE_VERSION      = $arModuleVersion['VERSION']      ?? '1.0.0';
         $this->MODULE_VERSION_DATE = $arModuleVersion['VERSION_DATE'] ?? date('Y-m-d H:i:s');
 
-        $this->MODULE_NAME        = Loc::getMessage('DERYKAMS_DFL_MODULE_NAME')        ?: 'Файлы сделки';
+        $this->MODULE_NAME        = Loc::getMessage('DERYKAMS_DFL_MODULE_NAME')        ?: 'Все файлы сделки';
         $this->MODULE_DESCRIPTION = Loc::getMessage('DERYKAMS_DFL_MODULE_DESCRIPTION') ?: 'Кнопка в карточке сделки для просмотра всех загруженных файлов';
 
         $this->PARTNER_NAME = Loc::getMessage('DERYKAMS_DFL_PARTNER_NAME') ?: 'DeryKams';
